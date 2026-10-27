@@ -16,6 +16,11 @@ A foreground service + wake lock keeps it running with the screen off.
 * Tap **Allow running in background** once so the phone doesn't kill the bot.
 * The **Browser** tab shows what the bot sees (useful for a captcha or a layout change).
 
+## Order flow (matches desktop)
+Open order -> tick "read" + action button -> wait the mandatory 60s lock -> click "Get Order" when clickable ->
+wait for the site's page to react -> only then judge "taken" vs "taken by another user".
+One order therefore never takes under 60s. Success markers only count if they are new after the click.
+
 ## Timing values
 All waits are in `app/src/main/java/com/acadbot/app/Timing.kt`; `(orig)` = same as desktop, `(new)` = Android-specific.
 

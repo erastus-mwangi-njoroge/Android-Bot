@@ -34,11 +34,9 @@ object BotEngine {
     private const val VIEW_W = 1280
     private const val VIEW_H = 900
 
-    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),w0:!!q('input#w0'),lbl:!!q('.b-upload__browse-label'),gc:!!window.__gc});})()"""
-
-    // One call per tick while waiting for "Get Order": tick "read", press the action button once,
-    // and click "Get Order" the instant it is visible and enabled.
-    private const val WAIT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var r=q("input[name='read']");if(r&&!r.checked)r.click();var a=q("a[type='button']");if(a&&!window.__abDone){window.__abDone=1;a.click();}var g=q('a.b-btn.b-btn_red.b-get-order__btn');var c=0;if(g&&vis(g)&&!g.disabled){window.__gc=1;g.click();c=1}return JSON.stringify({u:location.href,rs:document.readyState,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),clicked:c});})()"""
+    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
+    private const val READ_JS = """(function(){window.__bz=1;var r=document.querySelector("input[name='read']");if(r)r.click();var b=document.querySelector("a[type='button']");if(b)b.click();return 1})()"""
+    private const val CLICK_GET_JS = """(function(){var g=document.querySelector('a.b-btn.b-btn_red.b-get-order__btn');if(g){window.__bz=1;g.click();return 1}return 0})()"""
 
     interface Listener {
         fun onLog(line: String)
@@ -80,9 +78,15 @@ object BotEngine {
     private var phaseSince = 0L
     private var curId: String? = null
     private var t0 = 0L
+    private var readAt = 0L
+    private var clickedAt = 0L
+    private var preClickUrl = ""
+    private var preClickMarkers = false
     private var startedAt = 0L
-    private var nextRefreshAt = 0L
+    private var lastRefresh = 0L
+    private var nextRefreshCheck = 0L
     private var nextHeartbeat = 0L
+    private var lastAlive = 0L
     private var offPageSince = 0L
     private var loginAttempts = 0
     private var loginSubmittedAt = 0L
@@ -108,8 +112,8 @@ object BotEngine {
         orders = 0
         lastSeen = "--:--:--"
         seen.clear(); seenLogged.clear()
-        startedAt = now; offPageSince = 0L
-        nextRefreshAt = now + this.refreshMin * 60_000L
+        startedAt = now; lastRefresh = now; lastAlive = now; offPageSince = 0L
+        nextRefreshCheck = now + Timing.REFRESH_CHECK_MS
         nextHeartbeat = 0L
         loginAttempts = 0; loginSubmittedAt = 0L
         phase = Phase.SCAN; phaseSince = now; curId = null
@@ -119,6 +123,8 @@ object BotEngine {
         publish("Starting…")
         createWebView()
         webView?.loadUrl(LOGIN_URL)
+        main.removeCallbacks(watchdog)
+        main.postDelayed(watchdog, 10_000)
         kick(500)
     }
 
@@ -126,6 +132,7 @@ object BotEngine {
         val wasRunning = running
         running = false
         gen++
+        main.removeCallbacks(watchdog)
         sound?.stop(); sound = null
         destroyWebView()
         status = "Offline"
@@ -183,7 +190,7 @@ object BotEngine {
         webView?.loadUrl(ORDERS_URL)
         phase = Phase.SCAN
         phaseSince = SystemClock.elapsedRealtime()
-        nextRefreshAt = phaseSince + refreshMin * 60_000L
+        lastAlive = phaseSince
         kick(300)
     }
 
@@ -202,6 +209,17 @@ object BotEngine {
     }
 
     // ------------------------------------------------------------- loop
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (!running) return
+            if (SystemClock.elapsedRealtime() - lastAlive > Timing.WATCHDOG_MS) {
+                log("⚠️ Browser unresponsive - restarting it")
+                rebuild()
+            }
+            main.postDelayed(this, 10_000)
+        }
+    }
+
     private fun kick(delay: Long) {
         gen++
         val g = gen
@@ -212,10 +230,10 @@ object BotEngine {
         if (!running || g != gen) return
         housekeeping(SystemClock.elapsedRealtime())
         val wv = webView ?: return
-        val js = if (phase == Phase.GET_WAIT) WAIT_JS else SNAPSHOT_JS
-        wv.evaluateJavascript(js) { raw ->
+        wv.evaluateJavascript(SNAPSHOT_JS) { raw ->
             if (!running || g != gen) return@evaluateJavascript
             val now = SystemClock.elapsedRealtime()
+            lastAlive = now
             nextDelay = Timing.IDLE_POLL_MS
             try {
                 parse(raw)?.let { handle(it, now) }
@@ -238,8 +256,10 @@ object BotEngine {
             nextHeartbeat = now + Timing.HEARTBEAT_MS
             onHeartbeat?.invoke()
         }
-        // Exactly one refresh per interval; if an order is in progress it waits until that is done.
-        if (phase == Phase.SCAN && now >= nextRefreshAt) autoRefresh(now)
+        if (now >= nextRefreshCheck) {
+            nextRefreshCheck = now + Timing.REFRESH_CHECK_MS
+            if (phase == Phase.SCAN && now - lastRefresh >= refreshMin * 60_000L) autoRefresh(now)
+        }
     }
 
     private fun autoRefresh(now: Long) {
@@ -247,13 +267,14 @@ object BotEngine {
         val u = dec(wv.url ?: "")
         if ("order/index" in u) wv.reload() else wv.loadUrl(ORDERS_URL)
         seen.clear(); seenLogged.clear()
-        nextRefreshAt = now + refreshMin * 60_000L
+        lastRefresh = now
         dbg("🔄 Page refreshed")
     }
 
     // ------------------------------------------------------------- decisions
     private fun handle(s: JSONObject, now: Long) {
         val url = dec(s.optString("u"))
+        val loginForm = s.optBoolean("login")
         val onOrders = "order/index" in url
 
         if (onOrders) {
@@ -262,7 +283,7 @@ object BotEngine {
             if (status != "Online") publish("Online")
         }
 
-        if (s.optBoolean("login")) {
+        if (loginForm) {
             phase = Phase.SCAN
             doLogin(now)
             nextDelay = 300
@@ -273,7 +294,7 @@ object BotEngine {
             Phase.SCAN -> scan(s, url, onOrders, now)
             Phase.OPENING -> opening(s, url, now)
             Phase.ORDER -> order(s, now)
-            Phase.GET_WAIT -> getWait(s, url, now)
+            Phase.GET_WAIT -> getWait(s, now)
             Phase.AFTER_CLICK -> afterClick(s, url, now)
         }
     }
@@ -349,36 +370,41 @@ object BotEngine {
     }
 
     private fun order(s: JSONObject, now: Long) {
-        if (skipIfBid(s, now)) return
-        // The order page is open: from here WAIT_JS marks "read" and clicks "Get Order" as soon as it can.
-        phase = Phase.GET_WAIT
-        phaseSince = now
-        nextDelay = 0
-    }
-
-    private fun skipIfBid(s: JSONObject, now: Long): Boolean {
-        if (!s.optBoolean("bid")) return false
-        curId?.let { seen.add(it) }
-        log("⏭️ SKIPPED - Order $curId (BID REQUEST) - Time: ${secs(now)}s")
-        goIndex(now)
-        return true
-    }
-
-    private fun getWait(s: JSONObject, url: String, now: Long) {
-        if (skipIfBid(s, now)) return
-        if (s.optInt("clicked") == 1) {
-            phase = Phase.AFTER_CLICK
-            phaseSince = now
-            nextDelay = 100
-            dbg("🖱 Get Order clicked - checking result")
-            return
-        }
-        if ("order/index" in url) {
-            log("❌ Order $curId is no longer available - Time: ${secs(now)}s")
+        if (s.optBoolean("bid")) {
+            curId?.let { seen.add(it) }
+            log("⏭️ SKIPPED - Order $curId (BID REQUEST) - Time: ${secs(now)}s")
             goIndex(now)
             return
         }
-        if (now - phaseSince >= Timing.GET_ORDER_TIMEOUT_MS) {
+        webView?.evaluateJavascript(READ_JS, null)
+        phase = Phase.GET_WAIT
+        phaseSince = now
+        readAt = now
+        dbg("⏳ Order $curId opened - waiting for Get Order (60s lock)")
+        nextDelay = Timing.GET_ORDER_POLL_MS
+    }
+
+    private fun getWait(s: JSONObject, now: Long) {
+        val waited = now - readAt
+        // The site keeps the order locked for 60s. Never click (or judge) before that.
+        if (waited < Timing.GET_ORDER_MIN_WAIT_MS) {
+            nextDelay = Timing.AFTER_CLICK_POLL_MS
+            return
+        }
+        if (s.optBoolean("get")) {
+            preClickUrl = dec(s.optString("u"))
+            preClickMarkers = s.optBoolean("taken")
+            webView?.evaluateJavascript(CLICK_GET_JS) { r ->
+                if (r != "1") dbg("⚠️ Get Order click found no button")
+            }
+            phase = Phase.AFTER_CLICK
+            phaseSince = now
+            clickedAt = now
+            dbg("🖱️ Get Order clicked - waiting for site response")
+            nextDelay = Timing.AFTER_CLICK_POLL_MS
+            return
+        }
+        if (waited >= Timing.GET_ORDER_TIMEOUT_MS) {
             log("❌ Unable to process Order $curId - Time: ${secs(now)}s")
             goIndex(now)
             return
@@ -386,31 +412,34 @@ object BotEngine {
         nextDelay = Timing.GET_ORDER_POLL_MS
     }
 
-    /** Success criteria (same as the desktop bot): draft upload, paper upload label, or order view page. */
-    private fun takenReason(s: JSONObject, url: String): String? = when {
-        s.optBoolean("w0") -> "draft upload found"
-        s.optBoolean("lbl") -> "paper upload found"
-        "order/view" in url && "id=" in url -> "on order view page"
-        else -> null
-    }
-
+    /**
+     * Like the desktop bot, the verdict is only given once the page has reacted to the click
+     * (the click navigates / reloads the page). The marker window.__bz set right before the click
+     * disappears when a new page loads, so "marker gone + page complete" == "site answered".
+     */
     private fun afterClick(s: JSONObject, url: String, now: Long) {
-        // Judge only once the page has moved on from the click (new document, no longer loading),
-        // otherwise the pre-click order page would always look like a success.
-        val navigated = !s.optBoolean("gc")
-        val ready = s.optString("rs") != "loading"
-        val expired = now - phaseSince >= Timing.AFTER_CLICK_WINDOW_MS
-        if (!(navigated && ready) && !expired) {
-            nextDelay = 100
+        val loaded = !s.optBoolean("m") && s.optString("rs") == "complete"
+        val timedOut = now - phaseSince >= Timing.AFTER_CLICK_TIMEOUT_MS
+        if (!loaded && !timedOut) {
+            nextDelay = Timing.AFTER_CLICK_POLL_MS
             return
         }
-        val why = takenReason(s, url)
-        if (why != null) {
+        val markers = s.optBoolean("taken")
+        val onView = "order/view" in url && "id=" in url
+        val getStillThere = s.optBoolean("get")
+        val urlChanged = url != preClickUrl
+        // Success indicators are only trusted if they are NEW after the click
+        // (they can already be true on the pre-click order page).
+        val taken = loaded && !getStillThere &&
+            ((markers && !preClickMarkers) || (onView && urlChanged) || (markers && urlChanged))
+        if (taken) {
+            curId?.let { seen.add(it) }
             orders++
             sound?.play(R.raw.whistling)
+            dbg(if (markers) "   (upload section found)" else "   (on order view page)")
             log("✅ Order $curId taken successfully - Time: ${secs(now)}s")
-            dbg("   ($why)")
         } else {
+            curId?.let { seen.add(it) }
             log("❌ Order $curId taken by another user - Time: ${secs(now)}s")
         }
         publish()
@@ -419,11 +448,6 @@ object BotEngine {
 
     private fun goIndex(now: Long) {
         webView?.loadUrl(ORDERS_URL)
-        // Loading the list now counts as this interval's refresh if one was due.
-        if (now >= nextRefreshAt) {
-            seen.clear(); seenLogged.clear()
-            nextRefreshAt = now + refreshMin * 60_000L
-        }
         phase = Phase.SCAN
         phaseSince = now
         curId = null
