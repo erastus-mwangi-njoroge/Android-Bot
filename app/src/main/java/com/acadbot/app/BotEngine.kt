@@ -34,7 +34,7 @@ object BotEngine {
     private const val VIEW_W = 1280
     private const val VIEW_H = 900
 
-    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
+    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,t:(document.title||'').slice(0,60),a:((q('.alert,.b-alert,.error,.b-error')||{}).innerText||'').replace(/\s+/g,' ').slice(0,100),taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
     private const val READ_JS = """(function(){window.__bz=1;var r=document.querySelector("input[name='read']");if(r)r.click();var b=document.querySelector("a[type='button']");if(b)b.click();return 1})()"""
     private const val CLICK_GET_JS = """(function(){var g=document.querySelector('a.b-btn.b-btn_red.b-get-order__btn');if(g){window.__bz=1;g.click();return 1}return 0})()"""
 
@@ -350,7 +350,13 @@ object BotEngine {
         publish()
         phase = Phase.OPENING
         phaseSince = now
-        webView?.loadUrl(links!!.getString(target))
+        val href = links!!.getString(target)
+        val clickJs = "(function(h){var l=document.getElementsByClassName('b-table__order-link');" +
+            "for(var i=0;i<l.length;i++){if(l[i].href===h){l[i].click();return 1}}return 0})(" +
+            JSONObject.quote(href) + ")"
+        webView?.evaluateJavascript(clickJs) { r ->
+            if (r != "1" && running && phase == Phase.OPENING) webView?.loadUrl(href)
+        }
         nextDelay = 100
     }
 
@@ -413,33 +419,34 @@ object BotEngine {
     }
 
     /**
-     * Like the desktop bot, the verdict is only given once the page has reacted to the click
-     * (the click navigates / reloads the page). The marker window.__bz set right before the click
-     * disappears when a new page loads, so "marker gone + page complete" == "site answered".
+     * Same verdict as the desktop bot (_check_order_success), taken on the page the click leads to:
+     * upload input / upload label / order-view URL. The verdict is given as soon as the site has
+     * answered the click (page replaced, or URL changed) instead of after a fixed delay.
      */
     private fun afterClick(s: JSONObject, url: String, now: Long) {
-        val loaded = !s.optBoolean("m") && s.optString("rs") == "complete"
+        val replaced = !s.optBoolean("m")                       // marker gone => new document
+        val answered = replaced && s.optString("rs") != "loading"
         val timedOut = now - phaseSince >= Timing.AFTER_CLICK_TIMEOUT_MS
-        if (!loaded && !timedOut) {
+        if (!answered && !timedOut) {
             nextDelay = Timing.AFTER_CLICK_POLL_MS
             return
         }
         val markers = s.optBoolean("taken")
         val onView = "order/view" in url && "id=" in url
-        val getStillThere = s.optBoolean("get")
         val urlChanged = url != preClickUrl
-        // Success indicators are only trusted if they are NEW after the click
-        // (they can already be true on the pre-click order page).
-        val taken = loaded && !getStillThere &&
-            ((markers && !preClickMarkers) || (onView && urlChanged) || (markers && urlChanged))
+        // If the pre-click page already satisfied the checks they prove nothing, so then the
+        // page must really have changed. A click that got no answer at all is never a success.
+        val preSatisfied = preClickMarkers || ("order/view" in preClickUrl && "id=" in preClickUrl)
+        val taken = answered && (markers || onView) && (!preSatisfied || urlChanged)
+        log("ℹ️ Check: replaced=$replaced url=${url.substringAfter("r=").take(40)} " +
+            "upload=$markers view=$onView preUpload=$preClickMarkers preUrlView=${"order/view" in preClickUrl} " +
+            "title='${s.optString("t")}' alert='${s.optString("a")}'")
+        curId?.let { seen.add(it) }
         if (taken) {
-            curId?.let { seen.add(it) }
             orders++
             sound?.play(R.raw.whistling)
-            dbg(if (markers) "   (upload section found)" else "   (on order view page)")
             log("✅ Order $curId taken successfully - Time: ${secs(now)}s")
         } else {
-            curId?.let { seen.add(it) }
             log("❌ Order $curId taken by another user - Time: ${secs(now)}s")
         }
         publish()
