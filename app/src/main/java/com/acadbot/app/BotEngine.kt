@@ -385,6 +385,13 @@ object BotEngine {
             goIndex(now)
             return
         }
+        // No "read" checkbox => no "Get Order" button on this page: don't wait the 60s lock.
+        if (!s.optBoolean("rx")) {
+            curId?.let { seen.add(it) }
+            log("⏭️ SKIPPED - Order $curId (NO READ CHECKBOX) - Time: ${secs(now)}s")
+            goIndex(now)
+            return
+        }
         webView?.evaluateJavascript(ENSURE_READ_JS) { r ->
             dbg("☑️ Read checkbox: $r")
             webView?.evaluateJavascript(ACTION_JS, null)
