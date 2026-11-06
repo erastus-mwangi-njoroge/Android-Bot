@@ -34,8 +34,11 @@ object BotEngine {
     private const val VIEW_W = 1280
     private const val VIEW_H = 900
 
-    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,t:(document.title||'').slice(0,60),a:((q('.alert,.b-alert,.error,.b-error')||{}).innerText||'').replace(/\s+/g,' ').slice(0,100),taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
-    private const val READ_JS = """(function(){window.__bz=1;var r=document.querySelector("input[name='read']");if(r)r.click();var b=document.querySelector("a[type='button']");if(b)b.click();return 1})()"""
+    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,rx:!!q("input[name='read']"),rd:!!(q("input[name='read']")||{}).checked,t:(document.title||'').slice(0,60),a:((q('.alert,.b-alert,.error,.b-error')||{}).innerText||'').replace(/\s+/g,' ').slice(0,100),taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
+    // Makes sure the "I have read the instructions" checkbox is really checked (idempotent: never unticks).
+    // Tries a normal click, then its label, then sets the state and fires the events the site listens to.
+    private const val ENSURE_READ_JS = """(function(){var r=document.querySelector("input[name='read']");if(!r)return 'none';if(!r.checked)r.click();if(!r.checked){var l=(r.id?document.querySelector("label[for='"+r.id+"']"):null)||r.closest('label')||r.parentElement;if(l)l.click()}if(!r.checked){r.checked=true;r.dispatchEvent(new Event('input',{bubbles:true}));r.dispatchEvent(new Event('change',{bubbles:true}))}return r.checked?'1':'0'})()"""
+    private const val ACTION_JS = """(function(){window.__bz=1;var b=document.querySelector("a[type='button']");if(b)b.click();return b?1:0})()"""
     private const val CLICK_GET_JS = """(function(){var g=document.querySelector('a.b-btn.b-btn_red.b-get-order__btn');if(g){window.__bz=1;g.click();return 1}return 0})()"""
 
     interface Listener {
@@ -382,7 +385,10 @@ object BotEngine {
             goIndex(now)
             return
         }
-        webView?.evaluateJavascript(READ_JS, null)
+        webView?.evaluateJavascript(ENSURE_READ_JS) { r ->
+            dbg("☑️ Read checkbox: $r")
+            webView?.evaluateJavascript(ACTION_JS, null)
+        }
         phase = Phase.GET_WAIT
         phaseSince = now
         readAt = now
@@ -394,6 +400,12 @@ object BotEngine {
         val waited = now - readAt
         // The site keeps the order locked for 60s. Never click (or judge) before that.
         if (waited < Timing.GET_ORDER_MIN_WAIT_MS) {
+            nextDelay = Timing.AFTER_CLICK_POLL_MS
+            return
+        }
+        // The site refuses "Get Order" unless the instructions are marked as read: verify, retry if not.
+        if (s.optBoolean("rx") && !s.optBoolean("rd")) {
+            webView?.evaluateJavascript(ENSURE_READ_JS) { r -> dbg("☑️ Read checkbox re-applied: $r") }
             nextDelay = Timing.AFTER_CLICK_POLL_MS
             return
         }
@@ -425,21 +437,17 @@ object BotEngine {
      */
     private fun afterClick(s: JSONObject, url: String, now: Long) {
         val replaced = !s.optBoolean("m")                       // marker gone => new document
-        val answered = replaced && s.optString("rs") != "loading"
+        val answered = replaced && s.optString("rs") == "complete" // full page, so the upload section has rendered
         val timedOut = now - phaseSince >= Timing.AFTER_CLICK_TIMEOUT_MS
         if (!answered && !timedOut) {
             nextDelay = Timing.AFTER_CLICK_POLL_MS
             return
         }
         val markers = s.optBoolean("taken")
-        val onView = "order/view" in url && "id=" in url
-        val urlChanged = url != preClickUrl
-        // If the pre-click page already satisfied the checks they prove nothing, so then the
-        // page must really have changed. A click that got no answer at all is never a success.
-        val preSatisfied = preClickMarkers || ("order/view" in preClickUrl && "id=" in preClickUrl)
-        val taken = answered && (markers || onView) && (!preSatisfied || urlChanged)
+        // The ONLY success metric: the upload section exists (order is really ours).
+        val taken = markers && (answered || timedOut)
         log("ℹ️ Check: replaced=$replaced url=${url.substringAfter("r=").take(40)} " +
-            "upload=$markers view=$onView preUpload=$preClickMarkers preUrlView=${"order/view" in preClickUrl} " +
+            "upload=$markers preUpload=$preClickMarkers read=${s.optBoolean("rd")} " +
             "title='${s.optString("t")}' alert='${s.optString("a")}'")
         curId?.let { seen.add(it) }
         if (taken) {
