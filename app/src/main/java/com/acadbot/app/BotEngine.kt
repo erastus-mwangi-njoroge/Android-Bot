@@ -84,7 +84,7 @@ object BotEngine {
     private var t0 = 0L
     private var readAt = 0L
     private var clickedAt = 0L
-    private var orderSeenAt = 0L
+    private var readDone = false
     private var preClickUrl = ""
     private var preClickMarkers = false
     private var startedAt = 0L
@@ -387,42 +387,35 @@ object BotEngine {
             goIndex(now)
             return
         }
-        // Like the desktop bot (page fully handed over before mark_read), give the page a moment to
-        // render the "read" checkbox. Only if it never shows up is there no "Get Order" button to wait for.
-        if (!s.optBoolean("rx")) {
-            if (orderSeenAt == 0L) orderSeenAt = now
-            if (now - orderSeenAt < Timing.READ_BOX_WAIT_MS) {
-                nextDelay = Timing.AFTER_CLICK_POLL_MS
-                return
-            }
-            orderSeenAt = 0L
-            curId?.let { seen.add(it) }
-            log("⏭️ SKIPPED - Order $curId (NO READ CHECKBOX) - Time: ${secs(now)}s")
-            dbg("   page: inputs=[${s.optString("in")}] iframes=${s.optInt("fr")} title='${s.optString("t")}'")
-            goIndex(now)
-            return
-        }
-        orderSeenAt = 0L
-        webView?.evaluateJavascript(ENSURE_READ_JS) { r ->
-            dbg("☑️ Read checkbox: $r")
-            webView?.evaluateJavascript(ACTION_JS, null)
-        }
+        // The 60s lock starts the moment the order opens. The "read" checkbox is handled inside
+        // GET_WAIT, whenever it becomes available during that window (not immediately on open).
         phase = Phase.GET_WAIT
         phaseSince = now
         readAt = now
-        dbg("⏳ Order $curId opened - waiting for Get Order (60s lock)")
+        readDone = false
+        dbg("⏳ Order $curId opened - 60s lock started")
         nextDelay = Timing.GET_ORDER_POLL_MS
     }
 
     private fun getWait(s: JSONObject, now: Long) {
         val waited = now - readAt
+        // Tick "read" (+ action button) once, as soon as the checkbox exists during the lock window.
+        if (!readDone && s.optBoolean("rx")) {
+            readDone = true
+            webView?.evaluateJavascript(ENSURE_READ_JS) { r ->
+                dbg("☑️ Read checkbox ticked at ${waited / 1000}s: $r")
+                webView?.evaluateJavascript(ACTION_JS, null)
+            }
+            nextDelay = Timing.AFTER_CLICK_POLL_MS
+            return
+        }
         // The site keeps the order locked for 60s. Never click (or judge) before that.
         if (waited < Timing.GET_ORDER_MIN_WAIT_MS) {
             nextDelay = Timing.AFTER_CLICK_POLL_MS
             return
         }
         // The site refuses "Get Order" unless the instructions are marked as read: verify, retry if not.
-        if (s.optBoolean("rx") && !s.optBoolean("rd")) {
+        if (readDone && s.optBoolean("rx") && !s.optBoolean("rd")) {
             webView?.evaluateJavascript(ENSURE_READ_JS) { r -> dbg("☑️ Read checkbox re-applied: $r") }
             nextDelay = Timing.AFTER_CLICK_POLL_MS
             return
