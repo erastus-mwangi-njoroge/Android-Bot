@@ -35,18 +35,13 @@ object BotEngine {
     private const val VIEW_W = 1280
     private const val VIEW_H = 900
 
-    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);var F=window.__bzF||null;return JSON.stringify({fl:F?F.l:[],fa:F?(Date.now()-F.t):-1,fg:!!(F&&F.login),u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,f:(window.__bzF&&Date.now()-window.__bzF.t<10000)?window.__bzF.l:[],in:Array.prototype.slice.call(document.querySelectorAll('input')).slice(0,10).map(function(i){return (i.name||i.id||i.type)}).join(','),fr:document.getElementsByTagName('iframe').length,rx:!!q("input[name='read']"),rd:!!(q("input[name='read']")||{}).checked,t:(document.title||'').slice(0,60),a:((q('.alert,.b-alert,.error,.b-error')||{}).innerText||'').replace(/\s+/g,' ').slice(0,100),taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
+    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,in:Array.prototype.slice.call(document.querySelectorAll('input')).slice(0,10).map(function(i){return (i.name||i.id||i.type)}).join(','),fr:document.getElementsByTagName('iframe').length,rx:!!q("input[name='read']"),rd:!!(q("input[name='read']")||{}).checked,t:(document.title||'').slice(0,60),a:((q('.alert,.b-alert,.error,.b-error')||{}).innerText||'').replace(/\s+/g,' ').slice(0,100),taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
     // Makes sure the "I have read the instructions" checkbox is really checked (idempotent: never unticks).
     // Tries a normal click, then its label, then sets the state and fires the events the site listens to.
     private const val ENSURE_READ_JS = """(function(){var r=document.querySelector("input[name='read']");if(!r)return 'none';if(!r.checked)r.click();if(!r.checked){var l=(r.id?document.querySelector("label[for='"+r.id+"']"):null)||r.closest('label')||r.parentElement;if(l)l.click()}if(!r.checked){r.checked=true;r.dispatchEvent(new Event('input',{bubbles:true}));r.dispatchEvent(new Event('change',{bubbles:true}))}return r.checked?'1':'0'})()"""
     // Background check of the order list, independent of the page's own live-update machinery.
-    // Same-origin fetch of the list page; result is parsed with DOMParser and kept in window.__bzF.
-    private const val POLL_JS = """(function(){if(window.__bzP)return 0;window.__bzP=1;fetch(location.origin+'/index.php?r=order%2Findex',{credentials:'include',cache:'no-store'}).then(function(r){return r.text()}).then(function(t){var d=new DOMParser().parseFromString(t,'text/html');var l=d.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(new URL(l[i].getAttribute('href'),location.href).href);window.__bzF={t:Date.now(),l:h,login:!!d.querySelector('input#loginform-login')};window.__bzP=0}).catch(function(){window.__bzP=0});return 1})()"""
     // Keeps the page believing it is on screen (a hidden WebView otherwise pauses the site's live updates).
     private const val VISIBLE_JS = "(function(){try{Object.defineProperty(document,'hidden',{get:function(){return false},configurable:true});Object.defineProperty(document,'visibilityState',{get:function(){return 'visible'},configurable:true});document.hasFocus=function(){return true};var b=function(e){e.stopImmediatePropagation()};document.addEventListener('visibilitychange',b,true);window.addEventListener('visibilitychange',b,true);window.addEventListener('blur',b,true)}catch(e){}})()"
-    // Independent live feed: fetches the order list in the background (no page refresh, no navigation)
-    // so new orders are noticed even if the page itself stopped updating. Driven from Kotlin, not page timers.
-    private const val FEED_JS = "(function(){try{if(window.__bzBusy)return;window.__bzBusy=1;fetch('index.php?r=order%2Findex',{credentials:'include',cache:'no-store'}).then(function(r){return r.text()}).then(function(t){var d=new DOMParser().parseFromString(t,'text/html'),a=d.getElementsByClassName('b-table__order-link'),o=[];for(var i=0;i<a.length;i++)o.push(new URL(a[i].getAttribute('href'),location.href).href);window.__bzF={l:o,t:Date.now()};window.__bzBusy=0}).catch(function(){window.__bzBusy=0})}catch(e){window.__bzBusy=0}})()"
     private const val ACTION_JS = """(function(){window.__bz=1;var b=document.querySelector("a[type='button']");if(b)b.click();return b?1:0})()"""
     private const val CLICK_GET_JS = """(function(){var g=document.querySelector('a.b-btn.b-btn_red.b-get-order__btn');if(g){window.__bz=1;g.click();return 1}return 0})()"""
 
@@ -94,8 +89,6 @@ object BotEngine {
     private var readAt = 0L
     private var clickedAt = 0L
     private var readDone = false
-    private var nextFeed = 0L
-    private var lastBgPoll = 0L
     private var preClickUrl = ""
     private var preClickMarkers = false
     private var startedAt = 0L
@@ -252,11 +245,6 @@ object BotEngine {
         if (!running || g != gen) return
         housekeeping(SystemClock.elapsedRealtime())
         val wv = webView ?: return
-        val t = SystemClock.elapsedRealtime()
-        if (phase == Phase.SCAN && t - lastBgPoll >= Timing.BG_POLL_MS && (wv.url ?: "").contains("academia-research.com")) {
-            lastBgPoll = t
-            wv.evaluateJavascript(POLL_JS, null)
-        }
         wv.evaluateJavascript(SNAPSHOT_JS) { raw ->
             if (!running || g != gen) return@evaluateJavascript
             val now = SystemClock.elapsedRealtime()
@@ -344,17 +332,11 @@ object BotEngine {
     }
 
     private fun scan(s: JSONObject, url: String, onOrders: Boolean, now: Long) {
-        // Background feed: poll the order list without touching the page (see FEED_JS).
-        if (onOrders && now >= nextFeed) {
-            nextFeed = now + Timing.FEED_POLL_MS
-            webView?.evaluateJavascript(FEED_JS, null)
-        }
+        // Orders are read from the live page only; the site populates it by itself (no extra requests).
         val domLinks = s.optJSONArray("l")
-        val feed = s.optJSONArray("f")
         val all = ArrayList<String>()
         val inDom = HashSet<String>()
         for (i in 0 until (domLinks?.length() ?: 0)) { val h = domLinks!!.getString(i); all.add(h); inDom.add(h) }
-        for (i in 0 until (feed?.length() ?: 0)) { val h = feed!!.getString(i); if (h !in inDom) all.add(h) }
         val n = all.size
         if (n == 0) {
             if (!onOrders && "account/login" !in url) {
@@ -386,7 +368,6 @@ object BotEngine {
         publish()
         phase = Phase.OPENING
         phaseSince = now
-        if (href !in inDom) dbg("📡 Order $targetId found by live feed")
         val clickJs = "(function(h){var l=document.getElementsByClassName('b-table__order-link');" +
             "for(var i=0;i<l.length;i++){if(l[i].href===h){l[i].click();return 1}}return 0})(" +
             JSONObject.quote(href) + ")"

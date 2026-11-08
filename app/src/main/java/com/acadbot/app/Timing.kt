@@ -5,10 +5,8 @@ package com.acadbot.app
  * values marked (new) are Android-specific and still open for tuning.
  */
 object Timing {
-    const val BG_POLL_MS = 2_000L            // (new) background fetch of the order list while idle
     const val BG_FRESH_MS = 8_000L           // (new) a background result older than this is ignored
     const val IDLE_POLL_MS = 50L             // (new) pause between order-list scans; desktop spun with no pause
-    const val FEED_POLL_MS = 1_500L          // (new) how often the background feed re-reads the order list
     const val GET_ORDER_POLL_MS = 50L        // (new) pause between "Get Order" button checks; desktop spun
     const val GET_ORDER_MIN_WAIT_MS = 60_000L // (orig) lock: "Get Order" only works 60s after the order is opened; never click earlier
     const val GET_ORDER_TIMEOUT_MS = 90_000L // (new) max total wait (from order opening) for the button: 60s lock + 30s grace
