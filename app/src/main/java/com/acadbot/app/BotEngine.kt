@@ -34,7 +34,7 @@ object BotEngine {
     private const val VIEW_W = 1280
     private const val VIEW_H = 900
 
-    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,rx:!!q("input[name='read']"),rd:!!(q("input[name='read']")||{}).checked,t:(document.title||'').slice(0,60),a:((q('.alert,.b-alert,.error,.b-error')||{}).innerText||'').replace(/\s+/g,' ').slice(0,100),taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
+    private const val SNAPSHOT_JS = """(function(){var q=function(s){return document.querySelector(s)};var vis=function(e){return !!e&&(e.offsetWidth>0||e.offsetHeight>0||e.getClientRects().length>0)};var g=q('a.b-btn.b-btn_red.b-get-order__btn');var l=document.getElementsByClassName('b-table__order-link'),h=[];for(var i=0;i<l.length;i++)h.push(l[i].href);return JSON.stringify({u:location.href,rs:document.readyState,l:h,login:!!q('input#loginform-login'),bid:!!q('#btn-request'),get:!!g&&vis(g)&&!g.disabled&&!/disabled/i.test(g.className||'')&&g.getAttribute('aria-disabled')!=='true',m:window.__bz===1,in:Array.prototype.slice.call(document.querySelectorAll('input')).slice(0,10).map(function(i){return (i.name||i.id||i.type)}).join(','),fr:document.getElementsByTagName('iframe').length,rx:!!q("input[name='read']"),rd:!!(q("input[name='read']")||{}).checked,t:(document.title||'').slice(0,60),a:((q('.alert,.b-alert,.error,.b-error')||{}).innerText||'').replace(/\s+/g,' ').slice(0,100),taken:!!q('input#w0')||!!q('.b-upload__browse-label')});})()"""
     // Makes sure the "I have read the instructions" checkbox is really checked (idempotent: never unticks).
     // Tries a normal click, then its label, then sets the state and fires the events the site listens to.
     private const val ENSURE_READ_JS = """(function(){var r=document.querySelector("input[name='read']");if(!r)return 'none';if(!r.checked)r.click();if(!r.checked){var l=(r.id?document.querySelector("label[for='"+r.id+"']"):null)||r.closest('label')||r.parentElement;if(l)l.click()}if(!r.checked){r.checked=true;r.dispatchEvent(new Event('input',{bubbles:true}));r.dispatchEvent(new Event('change',{bubbles:true}))}return r.checked?'1':'0'})()"""
@@ -56,6 +56,7 @@ object BotEngine {
     private val logBuffer = LinkedList<String>()
     private val seen = HashSet<String>()
     private val seenLogged = HashSet<String>()
+    private val bidIds = HashSet<String>()
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     private lateinit var app: Context
@@ -83,11 +84,11 @@ object BotEngine {
     private var t0 = 0L
     private var readAt = 0L
     private var clickedAt = 0L
+    private var orderSeenAt = 0L
     private var preClickUrl = ""
     private var preClickMarkers = false
     private var startedAt = 0L
     private var lastRefresh = 0L
-    private var nextRefreshCheck = 0L
     private var nextHeartbeat = 0L
     private var lastAlive = 0L
     private var offPageSince = 0L
@@ -114,9 +115,8 @@ object BotEngine {
         running = true
         orders = 0
         lastSeen = "--:--:--"
-        seen.clear(); seenLogged.clear()
+        seen.clear(); seenLogged.clear(); bidIds.clear()
         startedAt = now; lastRefresh = now; lastAlive = now; offPageSince = 0L
-        nextRefreshCheck = now + Timing.REFRESH_CHECK_MS
         nextHeartbeat = 0L
         loginAttempts = 0; loginSubmittedAt = 0L
         phase = Phase.SCAN; phaseSince = now; curId = null
@@ -212,14 +212,16 @@ object BotEngine {
     }
 
     // ------------------------------------------------------------- loop
+    // Silent safety net: if a tick's JS callback never came back, start the loop again.
+    // The browser is NOT restarted and nothing is logged.
     private val watchdog = object : Runnable {
         override fun run() {
             if (!running) return
             if (SystemClock.elapsedRealtime() - lastAlive > Timing.WATCHDOG_MS) {
-                log("⚠️ Browser unresponsive - restarting it")
-                rebuild()
+                lastAlive = SystemClock.elapsedRealtime()
+                kick(0)
             }
-            main.postDelayed(this, 10_000)
+            main.postDelayed(this, 5_000)
         }
     }
 
@@ -259,18 +261,18 @@ object BotEngine {
             nextHeartbeat = now + Timing.HEARTBEAT_MS
             onHeartbeat?.invoke()
         }
-        if (now >= nextRefreshCheck) {
-            nextRefreshCheck = now + Timing.REFRESH_CHECK_MS
-            if (phase == Phase.SCAN && now - lastRefresh >= refreshMin * 60_000L) autoRefresh(now)
-        }
+        // One refresh per interval, measured from the previous refresh. If an order is being
+        // processed when it falls due, it is done as soon as the bot is back on the order list.
+        if (phase == Phase.SCAN && now - lastRefresh >= refreshMin * 60_000L) autoRefresh(now)
     }
 
     private fun autoRefresh(now: Long) {
         val wv = webView ?: return
         val u = dec(wv.url ?: "")
+        lastRefresh = now                      // set first: guarantees a single refresh per interval
         if ("order/index" in u) wv.reload() else wv.loadUrl(ORDERS_URL)
-        seen.clear(); seenLogged.clear()
-        lastRefresh = now
+        seen.removeAll(bidIds); bidIds.clear() // bids are re-checked after a refresh; handled orders stay handled
+        seenLogged.clear()
         dbg("🔄 Page refreshed")
     }
 
@@ -380,18 +382,27 @@ object BotEngine {
 
     private fun order(s: JSONObject, now: Long) {
         if (s.optBoolean("bid")) {
-            curId?.let { seen.add(it) }
+            curId?.let { seen.add(it); bidIds.add(it) }
             log("⏭️ SKIPPED - Order $curId (BID REQUEST) - Time: ${secs(now)}s")
             goIndex(now)
             return
         }
-        // No "read" checkbox => no "Get Order" button on this page: don't wait the 60s lock.
+        // Like the desktop bot (page fully handed over before mark_read), give the page a moment to
+        // render the "read" checkbox. Only if it never shows up is there no "Get Order" button to wait for.
         if (!s.optBoolean("rx")) {
+            if (orderSeenAt == 0L) orderSeenAt = now
+            if (now - orderSeenAt < Timing.READ_BOX_WAIT_MS) {
+                nextDelay = Timing.AFTER_CLICK_POLL_MS
+                return
+            }
+            orderSeenAt = 0L
             curId?.let { seen.add(it) }
             log("⏭️ SKIPPED - Order $curId (NO READ CHECKBOX) - Time: ${secs(now)}s")
+            dbg("   page: inputs=[${s.optString("in")}] iframes=${s.optInt("fr")} title='${s.optString("t")}'")
             goIndex(now)
             return
         }
+        orderSeenAt = 0L
         webView?.evaluateJavascript(ENSURE_READ_JS) { r ->
             dbg("☑️ Read checkbox: $r")
             webView?.evaluateJavascript(ACTION_JS, null)
