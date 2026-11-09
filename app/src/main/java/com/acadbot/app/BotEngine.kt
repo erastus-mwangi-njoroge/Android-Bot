@@ -411,9 +411,21 @@ object BotEngine {
 
     private fun getWait(s: JSONObject, now: Long) {
         val waited = now - readAt
-        // Tick "read" (+ action button) once, as soon as the checkbox exists during the lock window.
-        if (!readDone && s.optBoolean("rx")) {
+        // At the READ_TICK_AT_MS mark of the lock (not on open): tick "read" (+ action button) once.
+        // If the order has no checkbox at that point there is no "Get Order" to wait for: abort the lock.
+        if (!readDone) {
+            if (waited < Timing.READ_TICK_AT_MS) {
+                nextDelay = Timing.AFTER_CLICK_POLL_MS
+                return
+            }
             readDone = true
+            if (!s.optBoolean("rx")) {
+                curId?.let { seen.add(it) }
+                log("⏭️ SKIPPED - Order $curId (NO READ CHECKBOX) - Time: ${secs(now)}s")
+                dbg("   page: inputs=[${s.optString("in")}] iframes=${s.optInt("fr")} title='${s.optString("t")}'")
+                goIndex(now)
+                return
+            }
             webView?.evaluateJavascript(ENSURE_READ_JS) { r ->
                 dbg("☑️ Read checkbox ticked at ${waited / 1000}s: $r")
                 webView?.evaluateJavascript(ACTION_JS, null)

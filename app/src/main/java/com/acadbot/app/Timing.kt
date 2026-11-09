@@ -9,6 +9,7 @@ object Timing {
     const val IDLE_POLL_MS = 50L             // (new) pause between order-list scans; desktop spun with no pause
     const val GET_ORDER_POLL_MS = 50L        // (new) pause between "Get Order" button checks; desktop spun
     const val GET_ORDER_MIN_WAIT_MS = 60_000L // (orig) lock: "Get Order" only works 60s after the order is opened; never click earlier
+    const val READ_TICK_AT_MS = 10_000L      // (new) tick the "read" checkbox this long after the order opens (inside the 60s lock)
     const val GET_ORDER_TIMEOUT_MS = 90_000L // (new) max total wait (from order opening) for the button: 60s lock + 30s grace
     const val AFTER_CLICK_POLL_MS = 250L     // (new) pause between checks while waiting for the page to react to the click
     const val AFTER_CLICK_TIMEOUT_MS = 20_000L // (new) max wait for the site's response after clicking before judging
