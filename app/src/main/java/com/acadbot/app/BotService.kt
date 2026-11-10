@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.net.wifi.WifiManager
 import android.os.PowerManager
 
 /** Keeps the process alive (foreground notification + wake lock) while the bot runs. */
@@ -22,6 +23,7 @@ class BotService : Service() {
     }
 
     private var wake: PowerManager.WakeLock? = null
+    private var wifi: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -50,6 +52,13 @@ class BotService : Service() {
                 setReferenceCounted(false)
                 acquire()
             }
+        }
+        // Keep Wi-Fi at full speed while the screen is off, otherwise the page's network stalls.
+        if (wifi == null) {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                       else @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wifi = wm.createWifiLock(mode, "AcadBot:wifi").apply { setReferenceCounted(false); acquire() }
         }
         val p = Prefs(this)
         BotEngine.onStopped = { stopForegroundCompat(); stopSelf() }
@@ -104,6 +113,8 @@ class BotService : Service() {
         if (BotEngine.running) BotEngine.stop()
         try { wake?.let { if (it.isHeld) it.release() } } catch (e: Exception) { }
         wake = null
+        try { wifi?.let { if (it.isHeld) it.release() } } catch (e: Exception) { }
+        wifi = null
         super.onDestroy()
     }
 }

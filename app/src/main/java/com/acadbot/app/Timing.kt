@@ -10,9 +10,14 @@ object Timing {
     const val GET_ORDER_POLL_MS = 50L        // (new) pause between "Get Order" button checks; desktop spun
     const val GET_ORDER_MIN_WAIT_MS = 60_000L // (orig) lock: "Get Order" only works 60s after the order is opened; never click earlier
     const val READ_TICK_AT_MS = 10_000L      // (new) tick the "read" checkbox this long after the order opens (inside the 60s lock)
+    const val GET_ORDER_MARGIN_MS = 500L     // (new) safety margin after the 60s lock before clicking "Get Order"
+    const val UPLOAD_GRACE_MS = 1_000L       // (new) after the page is replaced, how long to wait for the upload section before judging "lost"
+    const val CLICK_RETRY_MS = 3_000L        // (new) re-press "Get Order" if the page has not reacted after this long
     const val GET_ORDER_TIMEOUT_MS = 90_000L // (new) max total wait (from order opening) for the button: 60s lock + 30s grace
-    const val AFTER_CLICK_POLL_MS = 250L     // (new) pause between checks while waiting for the page to react to the click
-    const val AFTER_CLICK_TIMEOUT_MS = 20_000L // (new) max wait for the site's response after clicking before judging
+    const val AFTER_CLICK_POLL_MS = 100L     // (new) pause between checks while waiting for the page to react to the click
+    const val POST_CLICK_POLL_MS = 40L       // (new) faster checks only while waiting for the site's answer AFTER "Get Order" is clicked
+    const val AFTER_CLICK_TIMEOUT_MS = 10_000L // (new) max wait for the site's response after clicking before judging
+    const val HANDLED_COOLDOWN_MS = 120_000L // (new) ignore an order we just processed for this long; after that it can be taken again
     const val PAGE_LOAD_TIMEOUT_MS = 20_000L // (new) give up if an order page never opens
     const val OFFPAGE_RECOVER_MS = 20_000L   // (new) go back to the order list if stuck elsewhere
     const val LOGIN_WAIT_MS = 15_000L        // (orig) wait for login to complete

@@ -19,6 +19,7 @@ import android.text.method.HideReturnsTransformationMethod
 import android.text.method.PasswordTransformationMethod
 import android.text.style.ForegroundColorSpan
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
@@ -49,6 +50,7 @@ class MainActivity : Activity(), BotEngine.Listener {
     private lateinit var tabs: Array<Button>
     private lateinit var panels: Array<View>
     private lateinit var panelBrowser: FrameLayout
+    private lateinit var parkHost: FrameLayout
     private lateinit var etEmail: EditText
     private lateinit var etPass: EditText
     private lateinit var etToken: EditText
@@ -75,6 +77,11 @@ class MainActivity : Activity(), BotEngine.Listener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        // Keep the bot's browser attached to a (practically invisible) on-screen host at all times.
+        parkHost = FrameLayout(this).apply { clipChildren = true; alpha = 0.01f }
+        addContentView(parkHost, ViewGroup.LayoutParams(1, 1))
+        BotEngine.parkHost = parkHost
+        BotEngine.park()
         prefs = Prefs(this)
         bind()
         loadPrefs()
@@ -94,6 +101,11 @@ class MainActivity : Activity(), BotEngine.Listener {
         BotEngine.publishNow()
         showTab(tab)
         ui.post(uptimeTick)
+    }
+
+    override fun onDestroy() {
+        BotEngine.unpark(parkHost)
+        super.onDestroy()
     }
 
     override fun onStop() {
@@ -235,9 +247,21 @@ class MainActivity : Activity(), BotEngine.Listener {
         }
         setAuth("Verified", green)
         savePrefs()
+        askIgnoreBatteryOptimizations()
         val i = Intent(this, BotService::class.java).setAction(BotService.ACTION_START)
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
         showTab(1)
+    }
+
+    @android.annotation.SuppressLint("BatteryLife")
+    private fun askIgnoreBatteryOptimizations() {
+        try {
+            val pm = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(android.net.Uri.parse("package:$packageName")))
+            }
+        } catch (e: Exception) { }
     }
 
     private fun stopBot() {

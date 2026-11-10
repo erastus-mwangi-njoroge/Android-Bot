@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Handler
+import android.os.Build
 import android.os.Looper
 import android.os.SystemClock
 import android.view.ViewGroup
@@ -61,6 +62,7 @@ object BotEngine {
     private val seen = HashSet<String>()
     private val seenLogged = HashSet<String>()
     private val bidIds = HashSet<String>()
+    private val handledAt = HashMap<String, Long>() // orders already processed -> when (short cooldown only)
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     private lateinit var app: Context
@@ -89,6 +91,8 @@ object BotEngine {
     private var readAt = 0L
     private var clickedAt = 0L
     private var readDone = false
+    private var clickTries = 0
+    private var repliedAt = 0L
     private var preClickUrl = ""
     private var preClickMarkers = false
     private var startedAt = 0L
@@ -119,7 +123,7 @@ object BotEngine {
         running = true
         orders = 0
         lastSeen = "--:--:--"
-        seen.clear(); seenLogged.clear(); bidIds.clear()
+        seen.clear(); seenLogged.clear(); bidIds.clear(); handledAt.clear()
         startedAt = now; lastRefresh = now; lastAlive = now; offPageSince = 0L
         nextHeartbeat = 0L
         loginAttempts = 0; loginSubmittedAt = 0L
@@ -158,6 +162,9 @@ object BotEngine {
     private fun createWebView() {
         destroyWebView()
         val wv = WebView(app)
+        // Keep the browser process at high priority even when the app is not in front (default lowers it,
+        // which freezes the page's scripts and made the bot deaf to new orders).
+        if (Build.VERSION.SDK_INT >= 26) wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -185,6 +192,7 @@ object BotEngine {
         wv.onResume()
         wv.resumeTimers()
         webView = wv
+        main.post { if (webView === wv && wv.parent == null) park() }
     }
 
     private fun destroyWebView() {
@@ -215,10 +223,30 @@ object BotEngine {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
 
-    fun detach() {
+    /** Tiny always-on-screen host owned by MainActivity. A WebView that is attached to a window is
+     *  treated as visible by Chromium, so the site's own timers/live updates keep running at full speed. */
+    @Volatile var parkHost: FrameLayout? = null
+
+    fun detach() = park()
+
+    /** Keep the browser attached (1x1px clipped window onto a full-size page) instead of orphaned. */
+    fun park() {
         val wv = webView ?: return
         (wv.parent as? ViewGroup)?.removeView(wv)
-        wv.layout(0, 0, VIEW_W, VIEW_H)
+        val host = parkHost
+        if (host != null) {
+            host.addView(wv, FrameLayout.LayoutParams(VIEW_W, VIEW_H))
+        } else {
+            wv.layout(0, 0, VIEW_W, VIEW_H)
+        }
+    }
+
+    fun unpark(host: FrameLayout) {
+        if (parkHost === host) {
+            parkHost = null
+            val wv = webView ?: return
+            if (wv.parent === host) { host.removeView(wv); wv.layout(0, 0, VIEW_W, VIEW_H) }
+        }
     }
 
     // ------------------------------------------------------------- loop
@@ -352,8 +380,14 @@ object BotEngine {
         var targetId: String? = null
         for (href in all) {
             val id = idOf(href)
-            if (id != null && id in seen) {
-                if (seenLogged.add(id)) log("⏭️ SKIPPED - Order $id (PREVIOUSLY SEEN)")
+            // Like the desktop bot, only bid requests are remembered. A processed order is ignored just
+            // for a short cooldown (list lag); if it is posted again later it must be picked up again.
+            val doneAt = if (id != null) handledAt[id] else null
+            if (id != null && doneAt != null && now - doneAt >= Timing.HANDLED_COOLDOWN_MS) {
+                handledAt.remove(id); seenLogged.remove(id)
+            }
+            if (id != null && (id in seen || handledAt.containsKey(id))) {
+                if (seenLogged.add(id)) log("⏭️ SKIPPED - Order $id (" + (if (id in seen) "BID REQUEST" else "JUST PROCESSED") + ")")
                 continue
             }
             targetHref = href; targetId = id
@@ -403,9 +437,11 @@ object BotEngine {
         // GET_WAIT, whenever it becomes available during that window (not immediately on open).
         phase = Phase.GET_WAIT
         phaseSince = now
-        readAt = now
+        repliedAt = 0L
+        readAt = t0   // lock is counted from the moment the order was opened, so page-load time isn't added on top
         readDone = false
-        dbg("⏳ Order $curId opened - 60s lock started")
+        clickTries = 0
+        dbg("⏳ Order $curId opened (+${(now - t0) / 1000.0}s to load) - lock counting from open")
         nextDelay = Timing.GET_ORDER_POLL_MS
     }
 
@@ -420,7 +456,7 @@ object BotEngine {
             }
             readDone = true
             if (!s.optBoolean("rx")) {
-                curId?.let { seen.add(it) }
+                curId?.let { handledAt[it] = now }
                 log("⏭️ SKIPPED - Order $curId (NO READ CHECKBOX) - Time: ${secs(now)}s")
                 dbg("   page: inputs=[${s.optString("in")}] iframes=${s.optInt("fr")} title='${s.optString("t")}'")
                 goIndex(now)
@@ -434,7 +470,7 @@ object BotEngine {
             return
         }
         // The site keeps the order locked for 60s. Never click (or judge) before that.
-        if (waited < Timing.GET_ORDER_MIN_WAIT_MS) {
+        if (waited < Timing.GET_ORDER_MIN_WAIT_MS + Timing.GET_ORDER_MARGIN_MS) {
             nextDelay = Timing.AFTER_CLICK_POLL_MS
             return
         }
@@ -453,6 +489,7 @@ object BotEngine {
             phase = Phase.AFTER_CLICK
             phaseSince = now
             clickedAt = now
+            clickTries = 1
             dbg("🖱️ Get Order clicked - waiting for site response")
             nextDelay = Timing.AFTER_CLICK_POLL_MS
             return
@@ -472,19 +509,32 @@ object BotEngine {
      */
     private fun afterClick(s: JSONObject, url: String, now: Long) {
         val replaced = !s.optBoolean("m")                       // marker gone => new document
-        val answered = replaced && s.optString("rs") == "complete" // full page, so the upload section has rendered
+        val markers = s.optBoolean("taken")
+        val state = s.optString("rs")
+        // Upload section present => taken: decide at once (no waiting for images/scripts to finish).
+        // Page replaced but no upload yet => short grace for it to render, then "taken by another user".
+        if (replaced && !markers && repliedAt == 0L) repliedAt = now
+        // Site already shows an error/alert on the replaced page and no upload: it is lost, no need to wait.
+        val errorShown = replaced && !markers && s.optString("a").isNotBlank()
+        val answered = replaced && (markers || errorShown || state == "complete" || now - repliedAt >= Timing.UPLOAD_GRACE_MS)
         val timedOut = now - phaseSince >= Timing.AFTER_CLICK_TIMEOUT_MS
+        if (!replaced && s.optBoolean("get") && clickTries < 3 && now - clickedAt >= Timing.CLICK_RETRY_MS) {
+            // Click did not register (button not live yet): press it again instead of judging.
+            clickTries++
+            clickedAt = now
+            webView?.evaluateJavascript(CLICK_GET_JS, null)
+            dbg("🖱️ Get Order clicked again (try $clickTries)")
+        }
         if (!answered && !timedOut) {
-            nextDelay = Timing.AFTER_CLICK_POLL_MS
+            nextDelay = Timing.POST_CLICK_POLL_MS
             return
         }
-        val markers = s.optBoolean("taken")
-        // The ONLY success metric: the upload section exists (order is really ours).
-        val taken = markers && (answered || timedOut)
+        repliedAt = 0L
+        val taken = markers
         log("ℹ️ Check: replaced=$replaced url=${url.substringAfter("r=").take(40)} " +
             "upload=$markers preUpload=$preClickMarkers read=${s.optBoolean("rd")} " +
             "title='${s.optString("t")}' alert='${s.optString("a")}'")
-        curId?.let { seen.add(it) }
+        curId?.let { handledAt[it] = now }
         if (taken) {
             orders++
             sound?.play(R.raw.whistling)
@@ -501,7 +551,7 @@ object BotEngine {
         phase = Phase.SCAN
         phaseSince = now
         curId = null
-        nextDelay = 200
+        nextDelay = 50
     }
 
     // ------------------------------------------------------------- helpers
