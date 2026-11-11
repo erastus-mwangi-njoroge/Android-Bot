@@ -12,6 +12,7 @@ import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebStorage
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import org.json.JSONObject
@@ -305,12 +306,27 @@ object BotEngine {
     }
 
     private fun autoRefresh(now: Long) {
-        val wv = webView ?: return
-        val u = dec(wv.url ?: "")
         lastRefresh = now                      // set first: guarantees a single refresh per interval
-        if ("order/index" in u) wv.reload() else wv.loadUrl(ORDERS_URL)
         seen.removeAll(bidIds); bidIds.clear() // bids are re-checked after a refresh; handled orders stay handled
         seenLogged.clear()
+        if (Timing.FULL_RELOGIN_ON_REFRESH) {
+            // Same effect as pressing Stop then Start: brand-new browser, session cleared, log in again.
+            log("🔄 Refresh: restarting browser and logging in again")
+            try {
+                CookieManager.getInstance().removeAllCookies(null)
+                CookieManager.getInstance().flush()
+                WebStorage.getInstance().deleteAllData()
+            } catch (e: Exception) { }
+            destroyWebView()
+            loginAttempts = 0
+            loginSubmittedAt = 0L
+            offPageSince = 0L
+            rebuild()
+            return
+        }
+        val wv = webView ?: return
+        val u = dec(wv.url ?: "")
+        if ("order/index" in u) wv.reload() else wv.loadUrl(ORDERS_URL)
         dbg("🔄 Page refreshed")
     }
 
@@ -450,6 +466,14 @@ object BotEngine {
         // At the READ_TICK_AT_MS mark of the lock (not on open): tick "read" (+ action button) once.
         // If the order has no checkbox at that point there is no "Get Order" to wait for: abort the lock.
         if (!readDone) {
+            // Upload section already on the page and no checkbox: this order is already ours. Nothing to wait for.
+            if (!s.optBoolean("rx") && s.optBoolean("taken")) {
+                readDone = true
+                curId?.let { handledAt[it] = now }
+                log("⏭️ SKIPPED - Order $curId (ALREADY YOURS - upload section present)")
+                goIndex(now)
+                return
+            }
             if (waited < Timing.READ_TICK_AT_MS) {
                 nextDelay = Timing.AFTER_CLICK_POLL_MS
                 return

@@ -21,6 +21,7 @@ object Timing {
     const val PAGE_LOAD_TIMEOUT_MS = 20_000L // (new) give up if an order page never opens
     const val OFFPAGE_RECOVER_MS = 20_000L   // (new) go back to the order list if stuck elsewhere
     const val LOGIN_WAIT_MS = 15_000L        // (orig) wait for login to complete
+    const val FULL_RELOGIN_ON_REFRESH = true  // (new) each refresh interval: new browser + clear session + log in again (false = plain page reload)
     const val HEARTBEAT_MS = 30_000L         // (orig)
     const val SOUND_COOLDOWN_MS = 5_000L     // (orig)
     const val ERROR_BACKOFF_MS = 2_000L      // (orig)
