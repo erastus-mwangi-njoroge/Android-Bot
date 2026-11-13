@@ -25,6 +25,5 @@ One order therefore never takes under 60s. Success markers only count if they ar
 All waits are in `app/src/main/java/com/acadbot/app/Timing.kt`; `(orig)` = same as desktop, `(new)` = Android-specific.
 
 ## Notes
-* Not built or run by the author - first build may need small fixes; send the Actions log if it fails.
 * Release APK is signed with the auto-generated debug key (fine for sideloading, not for Play Store).
 * The WebView uses a desktop Chrome user agent so the site's selectors match the desktop bot.
